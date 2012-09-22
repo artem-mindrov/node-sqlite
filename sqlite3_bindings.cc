@@ -16,11 +16,12 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <sqlite3.h>
 #include <v8.h>
 #include <node.h>
-#include <node_events.h>
+#include <node_object_wrap.h>
 
 using namespace v8;
 using namespace node;
 
+static Persistent<String> emit_symbol;
 
 #define CHECK(rc) { if ((rc) != SQLITE_OK)                              \
       return ThrowException(Exception::Error(String::New(               \
@@ -60,7 +61,7 @@ using namespace node;
 
 
 
-class Sqlite3Db : public EventEmitter
+class Sqlite3Db : public ObjectWrap
 {
 public:
   static void Init(v8::Handle<Object> target) 
@@ -69,13 +70,14 @@ public:
     
     Local<FunctionTemplate> t = FunctionTemplate::New(New);
     
-    t->Inherit(EventEmitter::constructor_template);
     t->InstanceTemplate()->SetInternalFieldCount(1);
     
     NODE_SET_PROTOTYPE_METHOD(t, "changes", Changes);
     NODE_SET_PROTOTYPE_METHOD(t, "close", Close);
     NODE_SET_PROTOTYPE_METHOD(t, "lastInsertRowid", LastInsertRowid);
     NODE_SET_PROTOTYPE_METHOD(t, "prepare", Prepare);
+
+    emit_symbol = NODE_PSYMBOL("emit");
     
     target->Set(v8::String::NewSymbol("DatabaseSync"), t->GetFunction());
 
@@ -142,7 +144,12 @@ protected:
   static int CommitHook(void* v_this) {
     HandleScope scope;
     Sqlite3Db* db = static_cast<Sqlite3Db*>(v_this);
-    db->Emit(String::New("commit"), 0, NULL); 
+    Local<Value> vChr[1];
+    vChr[0] = String::New("commit");
+    Local<Value> emit_v = db->handle_->Get(emit_symbol);
+    if (!emit_v->IsFunction()) return 0;
+    Local<Function> emit = Local<Function>::Cast(emit_v);
+    emit->Call(db->handle_, 1, vChr);
     // TODO: allow change in return value to convert to rollback...somehow
     return 0;
   }
@@ -150,16 +157,24 @@ protected:
   static void RollbackHook(void* v_this) {
     HandleScope scope;
     Sqlite3Db* db = static_cast<Sqlite3Db*>(v_this);
-    db->Emit(String::New("rollback"), 0, NULL); 
+    Local<Value> vChr[1];
+    vChr[0] = String::New("rollback");
+    Local<Value> emit_v = db->handle_->Get(emit_symbol);
+    if (!emit_v->IsFunction()) return;
+    Local<Function> emit = Local<Function>::Cast(emit_v);
+    emit->Call(db->handle_, 1, vChr);
   }
 
   static void UpdateHook(void* v_this, int operation, const char* database, 
                          const char* table, sqlite_int64 rowid) {
     HandleScope scope;
     Sqlite3Db* db = static_cast<Sqlite3Db*>(v_this);
-    Local<Value> args[] = { Int32::New(operation), String::New(database),
+    Local<Value> args[] = { String::New("update"), Int32::New(operation), String::New(database),
                             String::New(table), Number::New(rowid) };
-    db->Emit(String::New("update"), 4, args);
+    Local<Value> emit_v = db->handle_->Get(emit_symbol);
+    if (!emit_v->IsFunction()) return;
+    Local<Function> emit = Local<Function>::Cast(emit_v);
+    emit->Call(db->handle_, 5, args);
   }
 
   /*
@@ -195,7 +210,7 @@ protected:
     return scope.Close(statement);
   }
 
-  class Statement : public EventEmitter
+  class Statement : public ObjectWrap
   {
   public:
     static Persistent<FunctionTemplate> constructor_template;
@@ -206,7 +221,6 @@ protected:
       Local<FunctionTemplate> t = FunctionTemplate::New(New);
       constructor_template = Persistent<FunctionTemplate>::New(t);
       
-      t->Inherit(EventEmitter::constructor_template);
       t->InstanceTemplate()->SetInternalFieldCount(1);
       
       NODE_SET_PROTOTYPE_METHOD(t, "bind", Bind);
@@ -359,3 +373,4 @@ extern "C" void init (v8::Handle<Object> target)
   Sqlite3Db::Init(target);
 }
 
+NODE_MODULE(sqlite3_bindings, init)
